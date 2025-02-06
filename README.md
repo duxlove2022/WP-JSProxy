@@ -1,21 +1,12 @@
 # WP-JSProxy
 
-该项目实现了一个基于 Node.js 的反向代理服务器，用于反代指定的目标 WordPress 网站（理论上对单域名网站都有效），并自动将页面中所有返回的目标网址替换为当前访问的域名。
+该项目实现了一个基于 Node.js 的反向代理服务器，适合部署到Vercel之类的站点托管平台，用于反代指定的目标 WordPress 网站（理论上对单域名网站都有效），并自动将页面中所有返回的目标网址替换为当前访问的域名。
 
 ## 安装与运行
 
-### 部署到 Vercel
-
-- **预览版部署**：在终端运行
-  ```bash
-  vercel
-  ```
-  系统将生成一个预览网址供你测试。
-
-- **生产版部署**：在终端运行
-  ```bash
-  vercel --prod
-  ```
+在本地使用 Vercel CLI 部署到 Vercel。
+或者，Fork 本项目到你自己的 Github ，再到 Vercel 控制台部署。
+具体步骤可询问 ChatGPT 。
   
 ## 配置说明
 
@@ -31,12 +22,3 @@
 
 - **特殊路径处理**  
   对于 `/wp-login.php?action=postpass` 的请求，代码会特殊处理 Cookie 和重定向，以确保经过密码验证的页面能正常显示。
-
-## 项目结构
-.
-├── server.js // 反向代理核心代码
-├── package.json // 项目基本信息及依赖列表
-├── package-lock.json // 锁定依赖版本（如果存在）
-├── vercel.json // Vercel 部署配置（如果使用 Vercel 部署）
-├── .gitignore // Git 忽略文件配置
-└── README.md // 说明文档

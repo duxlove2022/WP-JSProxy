@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "projectSettings": {},
   "builds": [
     { "src": "server.js", "use": "@vercel/node" }
   ],

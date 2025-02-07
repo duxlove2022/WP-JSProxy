@@ -3,7 +3,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const zlib = require('zlib');
 const app = express();
 
-const targetUrl = 'https://targetUrl.com';
+const targetUrl = process.env.TARGET_URL || 'https://targetUrl.com';
 
 // 辅助函数：直接从请求中获取新的基础网址
 function getNewBaseUrl(req) {

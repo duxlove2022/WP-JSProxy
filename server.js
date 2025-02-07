@@ -133,6 +133,10 @@ app.use('/wp-login.php', createProxyMiddleware({
   target: targetUrl,
   changeOrigin: true,
   selfHandleResponse: true,
+  // 强制请求不使用压缩编码
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('accept-encoding', 'identity');
+  },
   onProxyRes: (proxyRes, req, res) => {
     if (req.url.includes('action=postpass')) {
       // 当请求中包含 action=postpass 时，从后端获取 Set-Cookie，
@@ -182,6 +186,10 @@ app.use('/', createProxyMiddleware({
   target: targetUrl,
   changeOrigin: true,
   selfHandleResponse: true,
+  // 强制请求不使用压缩编码
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('accept-encoding', 'identity');
+  },
   onProxyRes: modifyResponseBody
 }));
 

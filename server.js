@@ -37,7 +37,9 @@ function getNewBaseUrl(req) {
 
 // 判断请求是否为API请求（简化判断逻辑）
 function isApiRequest(req) {
-  return req.path.startsWith('/v1') || req.path === '/';
+  // 只匹配明确的API路径，避免误判
+  // 只有/v1开头的路径或者根路径/才被视为API请求
+  return (req.path.startsWith('/v1/') || req.path === '/v1' || req.path === '/');
 }
 
 // 为API请求创建专门的代理中间件
@@ -123,6 +125,11 @@ function modifyResponseBody(proxyRes, req, res) {
                    contentType.includes('xml') ||
                    contentType.includes('javascript') ||
                    contentType.includes('css');
+    
+    // 一些调试信息，帮助排查问题
+    log(`处理响应: 路径=${req.path}, 内容类型=${contentType}, 是否文本=${isText}`);
+    log(`当前目标URL=${targetUrl}, 替换为=${getNewBaseUrl(req)}`);
+    
     if (!isText) {
       res.writeHead(proxyRes.statusCode, headers);
       return res.end(bodyBuffer);
@@ -139,7 +146,8 @@ function modifyResponseBody(proxyRes, req, res) {
         }
         let bodyText = decodedBuffer.toString('utf8');
         // 替换所有目标网址为新网址
-        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        const oldPattern = new RegExp(targetUrl.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g');
+        bodyText = bodyText.replace(oldPattern, getNewBaseUrl(req));
         let modifiedBuffer = Buffer.from(bodyText, 'utf8');
         // 再次压缩
         zlib.gzip(modifiedBuffer, (err, compressedBuffer) => {
@@ -162,7 +170,8 @@ function modifyResponseBody(proxyRes, req, res) {
           return res.end(bodyBuffer);
         }
         let bodyText = decodedBuffer.toString('utf8');
-        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        const oldPattern = new RegExp(targetUrl.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g');
+        bodyText = bodyText.replace(oldPattern, getNewBaseUrl(req));
         let modifiedBuffer = Buffer.from(bodyText, 'utf8');
         // 再次压缩
         zlib.deflate(modifiedBuffer, (err, compressedBuffer) => {
@@ -185,7 +194,8 @@ function modifyResponseBody(proxyRes, req, res) {
           return res.end(bodyBuffer);
         }
         let bodyText = decodedBuffer.toString('utf8');
-        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        const oldPattern = new RegExp(targetUrl.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g');
+        bodyText = bodyText.replace(oldPattern, getNewBaseUrl(req));
         let modifiedBuffer = Buffer.from(bodyText, 'utf8');
         // 再次压缩 Brotli
         zlib.brotliCompress(modifiedBuffer, (err, compressedBuffer) => {
@@ -202,7 +212,11 @@ function modifyResponseBody(proxyRes, req, res) {
     } else {
       // 未压缩的内容或不支持的编码
       let bodyText = bodyBuffer.toString('utf8');
-      bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+      // 转义正则表达式中的特殊字符
+      const oldPattern = new RegExp(targetUrl.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g');
+      log(`替换前大小: ${bodyText.length}, 正则: ${oldPattern}`);
+      bodyText = bodyText.replace(oldPattern, getNewBaseUrl(req));
+      log(`替换后大小: ${bodyText.length}`);
       let modifiedBuffer = Buffer.from(bodyText, 'utf8');
       headers['content-length'] = Buffer.byteLength(modifiedBuffer);
       res.writeHead(proxyRes.statusCode, headers);

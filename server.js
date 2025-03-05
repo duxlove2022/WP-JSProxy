@@ -3,6 +3,19 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const zlib = require('zlib');
 const app = express();
 
+// 添加body-parser中间件解析JSON请求体
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// 日志级别控制
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // 'debug', 'info', 'warn', 'error'
+const logger = {
+  debug: (...args) => LOG_LEVEL === 'debug' && console.debug(...args),
+  info: (...args) => ['debug', 'info'].includes(LOG_LEVEL) && console.log(...args),
+  warn: (...args) => ['debug', 'info', 'warn'].includes(LOG_LEVEL) && console.warn(...args),
+  error: (...args) => console.error(...args)
+};
+
 const targetUrl = process.env.TARGET_URL || 'https://targetUrl.com';
 
 // 辅助函数：直接从请求中获取新的基础网址
@@ -10,7 +23,91 @@ function getNewBaseUrl(req) {
   return `https://${req.headers.host}`;
 }
 
+// 判断请求是否为Grok API请求
+function isGrokApiRequest(req) {
+  // 检查请求路径或其他特征以识别Grok API请求
+  if (!req.path.startsWith('/v1')) {
+    return false;
+  }
+  
+  // 常见的AI API端点
+  const apiEndpoints = [
+    '/chat/completions',
+    '/completions',
+    '/generations',
+    '/models',
+    '/images/generations',
+    '/embeddings',
+    '/assistants',
+    '/threads',
+    '/runs'
+  ];
+  
+  // 检查是否包含任何已知API端点
+  return apiEndpoints.some(endpoint => req.path.includes(endpoint)) || 
+         // 备用检查：检查内容类型和accept头
+         (req.headers['content-type']?.includes('application/json') && 
+          req.headers['accept']?.includes('text/event-stream'));
+}
+
+// 为Grok API请求创建专门的代理中间件，支持流式响应
+// 注意：此中间件必须在一般处理中间件之前定义，以确保优先处理API请求
+app.use('/v1', (req, res, next) => {
+  // 只处理Grok API请求，其他请求传递给下一个中间件
+  if (!isGrokApiRequest(req)) {
+    return next();
+  }
+  
+  logger.info(`[Grok API] 处理API请求: ${req.path}`);
+  
+  // 使用相同的targetUrl，但是配置不同
+  const proxy = createProxyMiddleware({
+    target: targetUrl,
+    changeOrigin: true,
+    // 关键：不自行处理响应，直接传递流
+    selfHandleResponse: false,
+    // 保留原始请求头，允许压缩
+    onProxyReq: (proxyReq, req, res) => {
+      // 保留原始请求头
+      Object.keys(req.headers).forEach(key => {
+        // 除了host头，其他都原样传递
+        if (key !== 'host') {
+          proxyReq.setHeader(key, req.headers[key]);
+        }
+      });
+      
+      // 保留原始请求体
+      if (req.body) {
+        const bodyData = JSON.stringify(req.body);
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+      }
+    },
+    // 添加错误处理
+    onError: (err, req, res) => {
+      logger.error(`[Grok API] 代理错误: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Proxy error', message: err.message }));
+      }
+    },
+    // 记录代理响应信息
+    onProxyRes: (proxyRes, req, res) => {
+      // 只记录，不修改响应
+      logger.info(`[Grok API] 响应状态: ${proxyRes.statusCode}, 内容类型: ${proxyRes.headers['content-type'] || '未知'}`);
+    }
+  });
+  
+  proxy(req, res, next);
+});
+
 function modifyResponseBody(proxyRes, req, res) {
+  // 如果是Grok API请求，不应该走到这里
+  if (isGrokApiRequest(req)) {
+    logger.warn('[WordPress] Grok API请求被错误地由WordPress处理器处理');
+    return;
+  }
+  
   const chunks = [];
   // 收集响应数据块
   proxyRes.on('data', (chunk) => {
@@ -45,7 +142,7 @@ function modifyResponseBody(proxyRes, req, res) {
       // 处理 gzip 编码
       zlib.gunzip(bodyBuffer, (err, decodedBuffer) => {
         if (err) {
-          console.error('Gunzip error:', err);
+          logger.error('Gunzip error:', err);
           res.writeHead(proxyRes.statusCode, headers);
           return res.end(bodyBuffer);
         }
@@ -56,7 +153,7 @@ function modifyResponseBody(proxyRes, req, res) {
         // 再次压缩
         zlib.gzip(modifiedBuffer, (err, compressedBuffer) => {
           if (err) {
-            console.error('Gzip error:', err);
+            logger.error('Gzip error:', err);
             res.writeHead(proxyRes.statusCode, headers);
             return res.end(modifiedBuffer);
           }
@@ -69,7 +166,7 @@ function modifyResponseBody(proxyRes, req, res) {
       // 处理 deflate 编码
       zlib.inflate(bodyBuffer, (err, decodedBuffer) => {
         if (err) {
-          console.error('Inflate error:', err);
+          logger.error('Inflate error:', err);
           res.writeHead(proxyRes.statusCode, headers);
           return res.end(bodyBuffer);
         }
@@ -79,7 +176,7 @@ function modifyResponseBody(proxyRes, req, res) {
         // 再次压缩
         zlib.deflate(modifiedBuffer, (err, compressedBuffer) => {
           if (err) {
-            console.error('Deflate error:', err);
+            logger.error('Deflate error:', err);
             res.writeHead(proxyRes.statusCode, headers);
             return res.end(modifiedBuffer);
           }
@@ -92,7 +189,7 @@ function modifyResponseBody(proxyRes, req, res) {
       // 处理 Brotli (br) 编码
       zlib.brotliDecompress(bodyBuffer, (err, decodedBuffer) => {
         if (err) {
-          console.error('Brotli Decompress error:', err);
+          logger.error('Brotli Decompress error:', err);
           res.writeHead(proxyRes.statusCode, headers);
           return res.end(bodyBuffer);
         }
@@ -102,7 +199,7 @@ function modifyResponseBody(proxyRes, req, res) {
         // 再次压缩 Brotli
         zlib.brotliCompress(modifiedBuffer, (err, compressedBuffer) => {
           if (err) {
-            console.error('Brotli Compress error:', err);
+            logger.error('Brotli Compress error:', err);
             res.writeHead(proxyRes.statusCode, headers);
             return res.end(modifiedBuffer);
           }
@@ -123,7 +220,7 @@ function modifyResponseBody(proxyRes, req, res) {
   });
 
   proxyRes.on('error', (err) => {
-    console.error('Proxy response error:', err);
+    logger.error('Proxy response error:', err);
     res.end();
   });
 }
@@ -196,8 +293,24 @@ app.use('/', createProxyMiddleware({
 // 如果不在 Vercel 环境中，则启动本地服务器
 if (!process.env.VERCEL) {
   app.listen(3000, () => {
-    console.log('Proxy server is running on http://localhost:3000');
+    logger.info('Proxy server is running on http://localhost:3000');
   });
 }
+
+// 全局错误处理中间件，必须在所有路由之后定义
+app.use((err, req, res, next) => {
+  logger.error('服务器错误:', err.stack);
+  
+  // 检查是否已经发送了头部
+  if (res.headersSent) {
+    return next(err);
+  }
+  
+  // 发送错误响应
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: process.env.NODE_ENV === 'production' ? '服务器发生错误' : err.message
+  });
+});
 
 module.exports = app;

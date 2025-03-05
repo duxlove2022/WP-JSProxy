@@ -3,209 +3,201 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const zlib = require('zlib');
 const app = express();
 
-// 移除body-parser中间件，避免干扰原始请求
-// app.use(express.json({ limit: '10mb' }));
-// app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// 简化日志
-const debug = process.env.DEBUG === 'true';
-function log(...args) {
-  if (debug) console.log(...args);
-}
-
-// 添加CORS支持
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  
-  // 处理预检请求
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  next();
-});
-
 const targetUrl = process.env.TARGET_URL || 'https://targetUrl.com';
 
-// 获取当前请求的完整URL(含协议)
-function getProxyHost(req) {
-  const protocol = req.headers['x-forwarded-proto'] || 'http';
-  return `${protocol}://${req.headers.host}`;
+// 辅助函数：直接从请求中获取新的基础网址
+function getNewBaseUrl(req) {
+  return `https://${req.headers.host}`;
 }
 
-// 判断请求是否为API请求
-function isApiRequest(req) {
-  return (req.path.startsWith('/v1/') || req.path === '/v1' || req.path === '/');
-}
+function modifyResponseBody(proxyRes, req, res) {
+  const chunks = [];
+  // 收集响应数据块
+  proxyRes.on('data', (chunk) => {
+    chunks.push(chunk);
+  });
 
-// Grok API 反代处理
-app.use('/v1', (req, res, next) => {
-  if (isApiRequest(req)) {
-    log(`处理API请求: ${req.path}`);
-    
-    const proxy = createProxyMiddleware({
-      target: targetUrl,
-      changeOrigin: true,
-      selfHandleResponse: false,
-      onProxyReq: (proxyReq, req, res) => {
-        Object.keys(req.headers).forEach(key => {
-          if (key !== 'host') {
-            proxyReq.setHeader(key, req.headers[key]);
-          }
-        });
-      },
-      onError: (err, req, res) => {
-        console.error(`API代理错误: ${err.message}`);
-        if (!res.headersSent) {
-          res.status(502).json({ error: 'Proxy error', message: err.message });
+  proxyRes.on('end', () => {
+    const bodyBuffer = Buffer.concat(chunks);
+    // 复制响应头，后续会修改
+    const headers = Object.assign({}, proxyRes.headers);
+    // 更新 location 头（重定向链接）中的网址
+    if (headers.location) {
+      headers.location = headers.location.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+    }
+    // 删除 content-length，因为替换后可能会改变数据长度
+    delete headers['content-length'];
+
+    // 检查内容类型，只对文本类型内容进行替换，防止修改二进制数据（如图片）
+    const contentType = headers['content-type'] || '';
+    const isText = contentType.includes('text') ||
+                   contentType.includes('json') ||
+                   contentType.includes('xml') ||
+                   contentType.includes('javascript') ||
+                   contentType.includes('css');
+    if (!isText) {
+      res.writeHead(proxyRes.statusCode, headers);
+      return res.end(bodyBuffer);
+    }
+
+    const encoding = headers['content-encoding'];
+    if (encoding === 'gzip') {
+      // 处理 gzip 编码
+      zlib.gunzip(bodyBuffer, (err, decodedBuffer) => {
+        if (err) {
+          console.error('Gunzip error:', err);
+          res.writeHead(proxyRes.statusCode, headers);
+          return res.end(bodyBuffer);
         }
-      }
-    });
-    
-    return proxy(req, res, next);
-  }
-  
-  next();
-});
+        let bodyText = decodedBuffer.toString('utf8');
+        // 替换所有目标网址为新网址
+        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        let modifiedBuffer = Buffer.from(bodyText, 'utf8');
+        // 再次压缩
+        zlib.gzip(modifiedBuffer, (err, compressedBuffer) => {
+          if (err) {
+            console.error('Gzip error:', err);
+            res.writeHead(proxyRes.statusCode, headers);
+            return res.end(modifiedBuffer);
+          }
+          headers['content-length'] = Buffer.byteLength(compressedBuffer);
+          res.writeHead(proxyRes.statusCode, headers);
+          res.end(compressedBuffer);
+        });
+      });
+    } else if (encoding === 'deflate') {
+      // 处理 deflate 编码
+      zlib.inflate(bodyBuffer, (err, decodedBuffer) => {
+        if (err) {
+          console.error('Inflate error:', err);
+          res.writeHead(proxyRes.statusCode, headers);
+          return res.end(bodyBuffer);
+        }
+        let bodyText = decodedBuffer.toString('utf8');
+        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        let modifiedBuffer = Buffer.from(bodyText, 'utf8');
+        // 再次压缩
+        zlib.deflate(modifiedBuffer, (err, compressedBuffer) => {
+          if (err) {
+            console.error('Deflate error:', err);
+            res.writeHead(proxyRes.statusCode, headers);
+            return res.end(modifiedBuffer);
+          }
+          headers['content-length'] = Buffer.byteLength(compressedBuffer);
+          res.writeHead(proxyRes.statusCode, headers);
+          res.end(compressedBuffer);
+        });
+      });
+    } else if (encoding === 'br') {
+      // 处理 Brotli (br) 编码
+      zlib.brotliDecompress(bodyBuffer, (err, decodedBuffer) => {
+        if (err) {
+          console.error('Brotli Decompress error:', err);
+          res.writeHead(proxyRes.statusCode, headers);
+          return res.end(bodyBuffer);
+        }
+        let bodyText = decodedBuffer.toString('utf8');
+        bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        let modifiedBuffer = Buffer.from(bodyText, 'utf8');
+        // 再次压缩 Brotli
+        zlib.brotliCompress(modifiedBuffer, (err, compressedBuffer) => {
+          if (err) {
+            console.error('Brotli Compress error:', err);
+            res.writeHead(proxyRes.statusCode, headers);
+            return res.end(modifiedBuffer);
+          }
+          headers['content-length'] = Buffer.byteLength(compressedBuffer);
+          res.writeHead(proxyRes.statusCode, headers);
+          res.end(compressedBuffer);
+        });
+      });
+    } else {
+      // 未压缩的内容或不支持的编码
+      let bodyText = bodyBuffer.toString('utf8');
+      bodyText = bodyText.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+      let modifiedBuffer = Buffer.from(bodyText, 'utf8');
+      headers['content-length'] = Buffer.byteLength(modifiedBuffer);
+      res.writeHead(proxyRes.statusCode, headers);
+      res.end(modifiedBuffer);
+    }
+  });
 
-// 根路径处理
-app.use('/', (req, res, next) => {
-  if (req.path === '/') {
-    const proxy = createProxyMiddleware({
-      target: targetUrl,
-      changeOrigin: true,
-      selfHandleResponse: false
-    });
-    
-    return proxy(req, res, next);
-  }
-  
-  next();
-});
+  proxyRes.on('error', (err) => {
+    console.error('Proxy response error:', err);
+    res.end();
+  });
+}
 
-// WordPress 反代处理 - 使用通用配置
-const wpProxy = createProxyMiddleware({
+// 单独处理 wp-login.php 请求，针对 action=postpass 进行特殊处理，避免空白页面问题
+app.use('/wp-login.php', createProxyMiddleware({
   target: targetUrl,
   changeOrigin: true,
-  selfHandleResponse: true,  // 重要：必须自行处理响应
+  selfHandleResponse: true,
+  // 强制请求不使用压缩编码
   onProxyReq: (proxyReq, req, res) => {
-    // 不压缩，以便于处理响应内容
     proxyReq.setHeader('accept-encoding', 'identity');
   },
   onProxyRes: (proxyRes, req, res) => {
-    // 不处理API请求
-    if (isApiRequest(req)) {
-      return;
-    }
-    
-    // 处理重定向头
-    if (proxyRes.headers.location) {
-      log(`重定向URL: ${proxyRes.headers.location} -> 替换为代理域名`);
-      proxyRes.headers.location = proxyRes.headers.location.replace(targetUrl, getProxyHost(req));
-    }
-    
-    // 处理Cookie
-    if (proxyRes.headers['set-cookie']) {
-      proxyRes.headers['set-cookie'] = proxyRes.headers['set-cookie'].map(cookie => {
-        return cookie.replace(/domain=.*?;/gi, '');
+    if (req.url.includes('action=postpass')) {
+      // 当请求中包含 action=postpass 时，从后端获取 Set-Cookie，
+      // 将 cookie 中的 domain 属性去掉（或修改为新域），再返回302重定向到原始页面
+      const referer = req.headers.referer || getNewBaseUrl(req);
+      let setCookie = proxyRes.headers['set-cookie'];
+      if (setCookie) {
+        if (!Array.isArray(setCookie)) {
+          setCookie = [setCookie];
+        }
+        // 去除 cookie 中的 domain 属性，确保 cookie 默认作用于当前域
+        setCookie = setCookie.map(cookie => cookie.replace(/;?\s*domain=[^;]+/i, ''));
+      }
+      const headers = {
+        'Location': referer,
+        'Content-Type': 'text/html'
+      };
+      if (setCookie) {
+        headers['Set-Cookie'] = setCookie;
+      }
+      res.writeHead(302, headers);
+      res.end(`<html>
+  <head>
+    <meta http-equiv="refresh" content="0;url=${referer}">
+  </head>
+  <body>验证成功，正在重定向...</body>
+</html>`);
+    } else {
+      // 对于其他情况，直接转发响应数据，并修正 location 头中的目标网址
+      let chunks = [];
+      proxyRes.on('data', (chunk) => chunks.push(chunk));
+      proxyRes.on('end', () => {
+        const bodyBuffer = Buffer.concat(chunks);
+        const headers = Object.assign({}, proxyRes.headers);
+        if (headers.location) {
+          headers.location = headers.location.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
+        }
+        res.writeHead(proxyRes.statusCode, headers);
+        res.end(bodyBuffer);
       });
     }
-    
-    // 收集响应数据
-    const chunks = [];
-    proxyRes.on('data', chunk => chunks.push(chunk));
-    
-    proxyRes.on('end', () => {
-      // 检查是否有数据
-      if (!chunks.length) {
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        return res.end();
-      }
-      
-      const buffer = Buffer.concat(chunks);
-      
-      // 检查内容类型，只处理文本内容
-      const contentType = proxyRes.headers['content-type'] || '';
-      const isTextContent = contentType.includes('text') || 
-                            contentType.includes('javascript') || 
-                            contentType.includes('json') || 
-                            contentType.includes('xml') ||
-                            contentType.includes('css');
-      
-      if (!isTextContent) {
-        // 二进制内容直接传递
-        const headers = {...proxyRes.headers};
-        res.writeHead(proxyRes.statusCode, headers);
-        return res.end(buffer);
-      }
-      
-      // 处理文本内容，替换URL
-      try {
-        let body = buffer.toString('utf8');
-        const proxyHost = getProxyHost(req);
-        
-        log(`处理响应内容: ${req.path}, 大小: ${body.length}, 类型: ${contentType}`);
-        log(`将替换所有 ${targetUrl} 为 ${proxyHost}`);
-        
-        // 替换绝对URL
-        body = body.replace(new RegExp(targetUrl.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g'), proxyHost);
-        
-        // 提取域名部分进行替换 (处理没有协议的URL)
-        const targetDomain = new URL(targetUrl).hostname;
-        body = body.replace(new RegExp(`//(?:www\\.)?${targetDomain.replace(/\./g, '\\.')}`, 'g'), 
-                           `//${req.headers.host}`);
-        
-        // 替换HTML属性中的链接
-        ['href', 'src', 'action'].forEach(attr => {
-          const pattern = new RegExp(`(${attr}=["'])(?:https?:)?//${targetDomain.replace(/\./g, '\\.')}([^"']*)`, 'g');
-          body = body.replace(pattern, `$1${proxyHost}$2`);
-        });
-        
-        // 替换JSON字符串中的URL
-        body = body.replace(new RegExp(`"(https?:)?//${targetDomain.replace(/\./g, '\\.')}/`, 'g'), 
-                           `"${proxyHost}/`);
-        
-        // 设置正确的头部
-        const headers = {...proxyRes.headers};
-        delete headers['content-length'];
-        headers['content-length'] = Buffer.byteLength(body);
-        
-        res.writeHead(proxyRes.statusCode, headers);
-        res.end(body);
-      } catch (error) {
-        console.error('处理响应时出错:', error);
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
-        res.end(buffer);
-      }
-    });
   }
-});
+}));
 
-// 应用WordPress代理到所有其他路径
-app.use('/', wpProxy);
+// 其他请求使用响应体修改，替换目标网址
+app.use('/', createProxyMiddleware({
+  target: targetUrl,
+  changeOrigin: true,
+  selfHandleResponse: true,
+  // 强制请求不使用压缩编码
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('accept-encoding', 'identity');
+  },
+  onProxyRes: modifyResponseBody
+}));
 
-// 启动本地服务器 (非Vercel环境)
+// 如果不在 Vercel 环境中，则启动本地服务器
 if (!process.env.VERCEL) {
   app.listen(3000, () => {
-    log('代理服务器运行在 http://localhost:3000');
+    console.log('Proxy server is running on http://localhost:3000');
   });
 }
-
-// 全局错误处理
-app.use((err, req, res, next) => {
-  console.error('服务器错误:', err.stack);
-  
-  if (res.headersSent) {
-    return next(err);
-  }
-  
-  res.status(500).json({
-    error: '服务器内部错误',
-    message: debug ? err.message : '发生错误，请稍后再试'
-  });
-});
 
 module.exports = app;

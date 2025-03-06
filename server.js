@@ -25,8 +25,6 @@ function modifyResponseBody(proxyRes, req, res) {
     if (headers.location) {
       headers.location = headers.location.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
     }
-    // 删除 content-length，因为替换后可能会改变数据长度
-    delete headers['content-length'];
 
     // 检查内容类型，只对文本类型内容进行替换，防止修改二进制数据（如图片）
     const contentType = headers['content-type'] || '';
@@ -36,10 +34,18 @@ function modifyResponseBody(proxyRes, req, res) {
                    contentType.includes('javascript') ||
                    contentType.includes('css');
     if (!isText) {
+      // 对于二进制文件，保留原始的content-length头
+      // 如果没有原始的content-length头，则设置为缓冲区长度
+      if (!headers['content-length']) {
+        headers['content-length'] = Buffer.byteLength(bodyBuffer);
+      }
       res.writeHead(proxyRes.statusCode, headers);
       return res.end(bodyBuffer);
     }
 
+    // 对于文本内容，删除content-length，因为替换后可能会改变数据长度
+    delete headers['content-length'];
+    
     const encoding = headers['content-encoding'];
     if (encoding === 'gzip') {
       // 处理 gzip 编码
@@ -174,6 +180,18 @@ app.use('/wp-login.php', createProxyMiddleware({
         if (headers.location) {
           headers.location = headers.location.replace(new RegExp(targetUrl, 'g'), getNewBaseUrl(req));
         }
+        
+        // 判断内容类型，确保二进制文件有正确的 content-length
+        const contentType = headers['content-type'] || '';
+        const isText = contentType.includes('text') ||
+                       contentType.includes('json') ||
+                       contentType.includes('xml') ||
+                       contentType.includes('javascript') ||
+                       contentType.includes('css');
+        if (!isText && !headers['content-length']) {
+          headers['content-length'] = Buffer.byteLength(bodyBuffer);
+        }
+        
         res.writeHead(proxyRes.statusCode, headers);
         res.end(bodyBuffer);
       });

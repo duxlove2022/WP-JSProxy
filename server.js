@@ -3,7 +3,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const zlib = require('zlib');
 const app = express();
 
-const targetUrl = process.env.TARGET_URL || 'https://targetUrl.com';
+const targetUrl = process.env.TARGET_URL || 'https://b52f86b3afdee491405620b8746abf817e50855e-3000.dstack-prod8.phala.network';
 
 // 辅助函数：直接从请求中获取新的基础网址
 function getNewBaseUrl(req) {
